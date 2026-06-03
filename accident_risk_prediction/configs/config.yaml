@@ -1,0 +1,199 @@
+# =============================================================================
+# Multimodal Spatiotemporal Accident Risk Prediction
+# Single source of truth for all hyperparameters.
+# Values follow contracts defined in arnob/*.md.
+# =============================================================================
+
+seed: 42
+
+paths:
+  data_root: data
+  raw_videos: data/raw_videos
+  extracted_frames: data/extracted_frames
+  annotations: data/annotations
+  sequences: data/sequences
+  features: data/features
+  graphs: data/graphs
+  ego_state: data/features/ego_state
+  cache: data/cache
+  metadata: data/metadata
+  checkpoints: checkpoints
+  logs: logs
+
+# ---------------------------------------------------------------------------
+# Frame extraction (MD: 5-10 FPS, default 5)
+# ---------------------------------------------------------------------------
+frame_extraction:
+  frame_rate: 5
+  image_ext: jpg
+  resize: [640, 384] # (W, H) used at extraction time; YOLO/ViT re-resize internally
+
+# ---------------------------------------------------------------------------
+# Sequence construction (MD: 8-16 frames, default 12)
+# ---------------------------------------------------------------------------
+sequence:
+  length: 12
+  stride: 12 # non-overlapping windows
+  min_tracks: 1 # drop sequences with fewer tracked objects
+
+# ---------------------------------------------------------------------------
+# YOLOv8 (FROZEN - detection only)
+# ---------------------------------------------------------------------------
+yolo:
+  weights: yolov8n.pt
+  conf_threshold: 0.25
+  iou_threshold: 0.45
+  device: cuda
+  # Recommended class mapping (MD dataset_documentation.md)
+  class_mapping:
+    car: 0
+    motorcycle: 1
+    bicycle: 2
+    pedestrian: 3
+    bus: 4
+    truck: 5
+    rickshaw: 6
+  # COCO -> our class map; rickshaw absent from COCO -> -1 (filtered)
+  coco_to_ours:
+    2: 0 # car
+    3: 1 # motorcycle
+    1: 2 # bicycle
+    0: 3 # pedestrian (person)
+    5: 4 # bus
+    7: 5 # truck
+
+# ---------------------------------------------------------------------------
+# ByteTrack
+# ---------------------------------------------------------------------------
+tracking:
+  track_thresh: 0.5
+  match_thresh: 0.8
+  track_buffer: 30
+  min_track_length: 1 # preserve short-lived / ending tracks; set to 1 to keep almost all YOLO detections
+  frame_rate: 5
+
+# ---------------------------------------------------------------------------
+# Object / interaction features
+# ---------------------------------------------------------------------------
+features:
+  node_dim: 8 # [x,y,w,h,vx,vy,acc,object_type]
+  edge_dim: 4 # [proximity, rel_velocity_long, rel_velocity_lat, ttc]
+  num_object_classes: 7
+  ttc_eps: 1.0e-6
+  clamp_velocity: 50.0
+  clamp_acceleration: 20.0
+  clamp_ttc: 30.0
+
+# ---------------------------------------------------------------------------
+# Graph construction (MD: KNN, K=3-5; ego NOT a node)
+# ---------------------------------------------------------------------------
+graph:
+  k_neighbors: 4
+  include_ego_node: false
+  max_nodes: 32 # pad/truncate per frame for batching
+  pad_node_value: 0.0
+
+# ---------------------------------------------------------------------------
+# Vision Transformer (FROZEN)
+# Output contract: [B, 768]
+# ---------------------------------------------------------------------------
+vit:
+  model_name: google/vit-base-patch16-224-in21k
+  output_dim: 768
+  image_size: 224
+
+# ---------------------------------------------------------------------------
+# GNN / GAT
+# Output contract: [B, N, 256]
+# ---------------------------------------------------------------------------
+gnn:
+  hidden_dim: 128
+  output_dim: 256
+  num_heads: 4
+  num_layers: 2
+  dropout: 0.1
+  edge_dim: 4
+
+# ---------------------------------------------------------------------------
+# Temporal Transformer
+# Output contract: [B, 512]
+# ---------------------------------------------------------------------------
+temporal:
+  input_dim: 256 # matches GNN per-frame interaction embedding
+  d_model: 512
+  num_heads: 8
+  num_layers: 4
+  dim_feedforward: 1024
+  dropout: 0.1
+  max_seq_len: 32
+
+# ---------------------------------------------------------------------------
+# Ego Encoder (MLP) - Output contract: [B, 64]
+# ---------------------------------------------------------------------------
+ego_encoder:
+  input_features: [speed, rpm_estimate, brake, acceleration]
+  input_dim: 4
+  hidden_dim: 64
+  output_dim: 64
+  dropout: 0.1
+
+# ---------------------------------------------------------------------------
+# Cross-attention fusion - Output contract: [B, 512]
+# ---------------------------------------------------------------------------
+fusion:
+  d_model: 512
+  num_heads: 8
+  num_layers: 2
+  dropout: 0.1
+  output_dim: 512
+  vit_dim: 768
+  gnn_dim: 256
+  temporal_dim: 512
+  ego_dim: 64
+
+# ---------------------------------------------------------------------------
+# Output heads
+# ---------------------------------------------------------------------------
+heads:
+  num_classes: 4 # 0=safe, 1=slight, 2=moderate, 3=high
+  ttc_output_dim: 1
+
+# ---------------------------------------------------------------------------
+# Loss
+# ---------------------------------------------------------------------------
+loss:
+  lambda_ttc: 0.5
+  class_weights: null # set to list of length 4 to handle imbalance
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+training:
+  epochs: 50
+  batch_size: 12
+  learning_rate: 0.0001
+  weight_decay: 1.0e-4
+  num_workers: 4
+  pin_memory: true
+  grad_clip: 1.0
+  log_interval: 10
+  ckpt_interval: 1
+  early_stop_patience: 10
+  device: cuda
+
+# ---------------------------------------------------------------------------
+# Ablation switches (MD: must be supported)
+# ---------------------------------------------------------------------------
+ablation:
+  use_vit: true
+  use_gnn: true
+  use_temporal: true
+  use_ego: true
+
+# ---------------------------------------------------------------------------
+# Split (by video, not by frame)
+# ---------------------------------------------------------------------------
+split:
+  train: 0.70
+  val: 0.15
+  test: 0.15
