@@ -1,199 +1,189 @@
 # =============================================================================
-# Multimodal Spatiotemporal Accident Risk Prediction
+# Rider-centric accident risk prediction from helmet-POV video
 # Single source of truth for all hyperparameters.
-# Values follow contracts defined in arnob/*.md.
 # =============================================================================
 
 seed: 42
 
 paths:
-  data_root: data
   raw_videos: data/raw_videos
-  extracted_frames: data/extracted_frames
-  annotations: data/annotations
-  sequences: data/sequences
-  features: data/features
-  graphs: data/graphs
-  ego_state: data/features/ego_state
-  cache: data/cache
-  metadata: data/metadata
-  checkpoints: checkpoints
-  logs: logs
+  video_cache: data/video_cache            # per-video frames / detections / tracks / graphs / ViT
+  manifest: data/manifests/sequences.csv   # one row per sequence (written by make_event_sequences)
+  runs: runs                               # one folder per training run
 
 # ---------------------------------------------------------------------------
-# Frame extraction (MD: 5-10 FPS, default 5)
+# Frame sampling and sequence length
 # ---------------------------------------------------------------------------
 frame_extraction:
-  frame_rate: 5
-  image_ext: jpg
-  resize: [640, 384] # (W, H) used at extraction time; YOLO/ViT re-resize internally
+  frame_rate: 5            # sampled frames per second
+  resize: [640, 384]       # (W, H)
 
-# ---------------------------------------------------------------------------
-# Sequence construction (MD: 8-16 frames, default 12)
-# ---------------------------------------------------------------------------
 sequence:
-  length: 12
-  stride: 12 # non-overlapping windows
-  min_tracks: 1 # drop sequences with fewer tracked objects
+  length: 12               # frames per sequence (12 @ 5 fps = 2.4 s)
 
 # ---------------------------------------------------------------------------
-# YOLOv8 (FROZEN - detection only)
+# Event-based labelling (tools/mark_collisions.py + tools/make_event_sequences.py)
+# A window is labelled by its time-to-event (TTE) = event_time - time of the
+# window's LAST frame, so the model only sees frames before the decision point.
+# Bins are [min, max) in seconds.
+# ---------------------------------------------------------------------------
+event_labeling:
+  events_file: data/annotations/collision_events.json
+  # Motorcycle profile: urban speeds are lower, gaps tighter, and a rider can
+  # still swerve / lean out of a conflict later than a car can, so the bins
+  # are compressed vs. car-based TTC thresholds (car profile was 2 / 4 / 6 / 8).
+  bins:
+    high:     [0.0, 1.5]   # 3: inside rider reaction time (~1-1.5 s) -> practically unavoidable
+    moderate: [1.5, 3.0]   # 2: avoidable only with an immediate brake / swerve
+    slight:   [3.0, 4.5]   # 1: conflict developing, normal correction still possible
+  safe_min_tte: 6.0        # 0: windows >= 6 s before an event (or with no upcoming event)
+                           #    TTE in [4.5, 6) is an ambiguous buffer and is skipped
+  post_event_skip: 5.0     # skip this many seconds after each event (crash aftermath)
+  risk_stride: 2           # stride (sampled frames) inside the pre-event zone (more samples)
+  safe_stride: 12          # stride elsewhere (non-overlapping)
+  max_safe_per_video: 40   # cap safe windows per video to limit imbalance (null = no cap)
+  event_types: [collision, near_miss, loss_of_control]
+
+# ---------------------------------------------------------------------------
+# Cross-validation (grouped by video: a ride never spans two folds)
+# ---------------------------------------------------------------------------
+cv:
+  folds: 5                 # train.py --fold k : test = fold k, val = fold k+1, train = rest
+split:                     # used only when training without --fold
+  train: 0.70
+  val: 0.15
+  test: 0.15
+
+# ---------------------------------------------------------------------------
+# Detector (frozen). To use a fine-tuned Bangladesh detector: point `weights`
+# at it, list its class names in `classes`, and set `class_map` to
+# {detector_class_id: index_in_classes}. Leave a class out of `class_map` to
+# drop it (e.g. an `ego_vehicle` class).
 # ---------------------------------------------------------------------------
 yolo:
-  weights: yolov8n.pt
+  weights: weights/yolo26x.pt
   conf_threshold: 0.25
   iou_threshold: 0.45
   device: cuda
-  # Recommended class mapping (MD dataset_documentation.md)
-  class_mapping:
-    car: 0
-    motorcycle: 1
-    bicycle: 2
-    pedestrian: 3
-    bus: 4
-    truck: 5
-    rickshaw: 6
-  # COCO -> our class map; rickshaw absent from COCO -> -1 (filtered)
-  coco_to_ours:
-    2: 0 # car
-    3: 1 # motorcycle
-    1: 2 # bicycle
-    0: 3 # pedestrian (person)
-    5: 4 # bus
-    7: 5 # truck
+  classes: [car, motorcycle, bicycle, pedestrian, bus, truck]
+  class_map:               # COCO id -> index in `classes`
+    2: 0
+    3: 1
+    1: 2
+    0: 3
+    5: 4
+    7: 5
 
-# ---------------------------------------------------------------------------
-# ByteTrack
-# ---------------------------------------------------------------------------
-tracking:
-  track_thresh: 0.5
+# The rider's own handlebars / tank / arms get detected as "motorcycle" or
+# "person". Drop boxes of these classes that touch the bottom edge and are wide.
+ego_filter:
+  enabled: true
+  classes: [1, 2, 3]       # motorcycle, bicycle, pedestrian
+  min_bottom: 0.95         # box bottom >= this fraction of image height
+  min_width: 0.25          # box width  >= this fraction of image width
+
+# Where the rider is in the image (normalised cx, cy, w, h). Used as the ego
+# node of the graph and as the reference point for distance / bearing.
+ego_box: [0.5, 0.85, 0.5, 0.3]
+
+tracking:                  # ByteTrack, run once over the whole video
+  fps_multiplier: 3        # detect + track at 3 x frame_rate (15 fps) so fast objects still match
+  track_thresh: 0.3
   match_thresh: 0.8
-  track_buffer: 30
-  min_track_length: 1 # preserve short-lived / ending tracks; set to 1 to keep almost all YOLO detections
+  track_buffer: 5          # sampled frames a lost track is kept alive (1 s)
+  min_track_length: 3      # in dense (15 fps) frames
   frame_rate: 5
 
 # ---------------------------------------------------------------------------
-# Object / interaction features
+# Graph features
+#   node: [cx, cy, w, h, vx, vy, acc, dist_to_rider, bearing_sin, bearing_cos,
+#          looming (1/tau), tau, is_ego, one-hot class...]
+#   edge: [proximity, rel_velocity_long, rel_velocity_lat, ttc]
+# Velocities are head-motion compensated and log-scaled (no hard saturation).
 # ---------------------------------------------------------------------------
 features:
-  node_dim: 8 # [x,y,w,h,vx,vy,acc,object_type]
-  edge_dim: 4 # [proximity, rel_velocity_long, rel_velocity_lat, ttc]
-  num_object_classes: 7
-  ttc_eps: 1.0e-6
-  clamp_velocity: 50.0
-  clamp_acceleration: 20.0
-  clamp_ttc: 30.0
+  velocity_scale: 20.0     # px/s that maps to symlog(1)
+  accel_scale: 50.0        # px/s^2
+  loom_clamp: 3.0          # 1/s  (box-height growth rate)
+  tau_clamp: 6.0           # s    (looming time-to-contact cap)
+  ttc_clamp: 10.0          # s    (pairwise geometric TTC cap)
+  compensate_head_motion: true
 
-# ---------------------------------------------------------------------------
-# Graph construction (MD: KNN, K=3-5; ego NOT a node)
-# ---------------------------------------------------------------------------
 graph:
   k_neighbors: 4
-  include_ego_node: false
-  max_nodes: 32 # pad/truncate per frame for batching
-  pad_node_value: 0.0
+  include_ego_node: true
 
-# ---------------------------------------------------------------------------
-# Vision Transformer (FROZEN)
-# Output contract: [B, 768]
-# ---------------------------------------------------------------------------
+cache:
+  flip_aug: true           # also cache ViT embeddings of mirrored frames (train augmentation)
+  vit_batch: 32
+
 vit:
   model_name: google/vit-base-patch16-224-in21k
-  output_dim: 768
   image_size: 224
+  output_dim: 768
+
+ego_motion:
+  dim: 6                   # [tx, ty, rotation, log-scale, flow magnitude, inlier ratio]
 
 # ---------------------------------------------------------------------------
-# GNN / GAT
-# Output contract: [B, N, 256]
+# Model (about 1-2 M trainable parameters; ViT is frozen and pre-computed)
 # ---------------------------------------------------------------------------
-gnn:
-  hidden_dim: 128
-  output_dim: 256
-  num_heads: 4
-  num_layers: 2
-  dropout: 0.1
-  edge_dim: 4
+model:
+  d_model: 128
+  dropout: 0.2
+  gnn:
+    hidden_dim: 64
+    num_heads: 4
+    num_layers: 2
+  temporal:
+    num_heads: 4
+    num_layers: 2
+    dim_feedforward: 256
+  fusion:
+    num_heads: 4
+    num_layers: 1
 
-# ---------------------------------------------------------------------------
-# Temporal Transformer
-# Output contract: [B, 512]
-# ---------------------------------------------------------------------------
-temporal:
-  input_dim: 256 # matches GNN per-frame interaction embedding
-  d_model: 512
-  num_heads: 8
-  num_layers: 4
-  dim_feedforward: 1024
-  dropout: 0.1
-  max_seq_len: 32
-
-# ---------------------------------------------------------------------------
-# Ego Encoder (MLP) - Output contract: [B, 64]
-# ---------------------------------------------------------------------------
-ego_encoder:
-  input_features: [speed, rpm_estimate, brake, acceleration]
-  input_dim: 4
-  hidden_dim: 64
-  output_dim: 64
-  dropout: 0.1
-
-# ---------------------------------------------------------------------------
-# Cross-attention fusion - Output contract: [B, 512]
-# ---------------------------------------------------------------------------
-fusion:
-  d_model: 512
-  num_heads: 8
-  num_layers: 2
-  dropout: 0.1
-  output_dim: 512
-  vit_dim: 768
-  gnn_dim: 256
-  temporal_dim: 512
-  ego_dim: 64
-
-# ---------------------------------------------------------------------------
-# Output heads
-# ---------------------------------------------------------------------------
 heads:
-  num_classes: 4 # 0=safe, 1=slight, 2=moderate, 3=high
-  ttc_output_dim: 1
+  num_classes: 4           # 0=safe, 1=slight, 2=moderate, 3=high
+  type: ordinal            # ordinal (labels are ordered TTE bins) | softmax
 
-# ---------------------------------------------------------------------------
-# Loss
-# ---------------------------------------------------------------------------
 loss:
   lambda_ttc: 0.5
-  class_weights: null # set to list of length 4 to handle imbalance
+  class_weights: auto      # auto = inverse frequency from the training split | null | [w0, w1, w2, w3]
 
-# ---------------------------------------------------------------------------
-# Training
-# ---------------------------------------------------------------------------
 training:
-  epochs: 50
-  batch_size: 12
-  learning_rate: 0.0001
-  weight_decay: 1.0e-4
-  num_workers: 4
-  pin_memory: true
+  epochs: 60
+  batch_size: 32
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  num_workers: 0
   grad_clip: 1.0
-  log_interval: 10
-  ckpt_interval: 1
-  early_stop_patience: 10
+  early_stop_patience: 12
+  select_metric: f1        # checkpoint selection on validation: f1 (macro) | loss
+  flip_prob: 0.5
   device: cuda
 
+evaluation:
+  alarm_class: 1           # alarm score = P(risk >= this class)
+  alarm_threshold: 0.5
+
 # ---------------------------------------------------------------------------
-# Ablation switches (MD: must be supported)
+# Non-learned baseline: looming time-to-contact rule (tools/run_baselines.py,
+# features/looming_rule.py). Thresholds come from event_labeling.bins
+# (tau_fixed) or are fitted on the training folds (tau_tuned).
+# ---------------------------------------------------------------------------
+baselines:
+  looming:
+    front_cos: 0.5         # only objects within +-60 deg of straight ahead of the rider
+    min_height: 0.04       # ignore boxes shorter than this fraction of image height (noisy looming)
+    persist: 2             # the low tau must hold for this many frames (0.4 s)
+    softness: 0.5          # s, only shapes the scores used for AUC / AP
+
+# ---------------------------------------------------------------------------
+# Ablation switches
 # ---------------------------------------------------------------------------
 ablation:
   use_vit: true
   use_gnn: true
   use_temporal: true
   use_ego: true
-
-# ---------------------------------------------------------------------------
-# Split (by video, not by frame)
-# ---------------------------------------------------------------------------
-split:
-  train: 0.70
-  val: 0.15
-  test: 0.15

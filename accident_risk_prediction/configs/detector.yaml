@@ -1,0 +1,79 @@
+# =============================================================================
+# Bangladesh traffic detector: classes, data sources and training settings.
+# Used by tools/detector/*.py
+# =============================================================================
+
+# Final class list of the fine-tuned detector (order = class id).
+classes: [car, motorcycle, bicycle, pedestrian, bus, truck, rickshaw, cng, easy_bike, ego_vehicle]
+
+paths:
+  own_images: data/detector/own/images      # frames sampled from your helmet videos
+  own_labels: data/detector/own/labels      # YOLO .txt labels (pre-filled, then corrected by you)
+  merged: data/detector/merged              # training-ready dataset written by merge_datasets
+
+# --- 1. Frame sampling from your own videos ---------------------------------
+sampling:
+  per_video: 15            # evenly spread frames per video
+  per_event: 5             # extra frames in the seconds before each marked collision
+  event_window_s: 3.0
+  max_width: 1280          # frames are saved at this width (labels are resolution-independent)
+  min_difference: 4.0      # skip frames that look almost identical to the previous one
+
+# --- 2. Pre-labelling with the current COCO detector ------------------------
+prelabel:
+  weights: weights/yolo26x.pt
+  conf: 0.30
+  coco_to_class: {2: car, 3: motorcycle, 1: bicycle, 0: pedestrian, 5: bus, 7: truck}
+  add_ego_vehicle: true    # boxes the ego filter would remove are pre-labelled as ego_vehicle
+
+# --- 3. Public datasets to merge in -----------------------------------------
+# Add one entry per downloaded dataset. `format` is yolo (one .txt per image)
+# or voc (one .xml per image). `map` sends each SOURCE class name to one of the
+# classes above; classes not listed are dropped. For yolo format give `names`
+# (the source class list, in id order) or `data_yaml` (the dataset's own yaml).
+# Images that end up with no boxes are skipped.
+public_datasets: []
+# Example (edit names to match the dataset you downloaded):
+# public_datasets:
+#   - name: dhaka_ai
+#     images: data/detector/public/dhaka_ai/images
+#     labels: data/detector/public/dhaka_ai/labels
+#     format: yolo
+#     names: [ambulance, auto rickshaw, bicycle, bus, car, garbagevan, human hauler, minibus,
+#             minivan, motorbike, pickup, army vehicle, policecar, rickshaw, scooter, suv, taxi,
+#             three wheelers (CNG), truck, van, wheelbarrow]
+#     map:
+#       car: car
+#       suv: car
+#       taxi: car
+#       minivan: car
+#       policecar: car
+#       motorbike: motorcycle
+#       scooter: motorcycle
+#       bicycle: bicycle
+#       bus: bus
+#       minibus: bus
+#       human hauler: bus
+#       truck: truck
+#       pickup: truck
+#       van: truck
+#       rickshaw: rickshaw
+#       three wheelers (CNG): cng
+#       auto rickshaw: easy_bike
+
+merge:
+  val_fraction: 0.2        # of YOUR videos (whole videos go to val, never single frames)
+  public_in_val: false     # validate only on helmet-POV frames: that is the target domain
+  seed: 42
+
+# --- 4. Training -------------------------------------------------------------
+train:
+  base_weights: yolo26m.pt # medium model: fits a 12 GB GPU and trains in hours, not days
+  imgsz: 640
+  epochs: 100
+  patience: 20
+  batch: 16               # images per step; lower to 8 if the GPU runs out of memory
+  workers: 2               # data-loading processes; each loads PyTorch (~0.7 GB RAM), so keep this small on Windows
+  degrees: 10              # random rotation: imitates the bike leaning
+  project: runs/detector
+  name: bd_traffic

@@ -1,67 +1,49 @@
-"""Evaluation entrypoint.
+"""Re-evaluate a finished run's best checkpoint.
 
-Usage:
-    python evaluate.py --config configs/config.yaml --checkpoint checkpoints/best.pt
+    python evaluate.py --run runs/default/fold0_seed42
+    python evaluate.py --run runs/default/fold0_seed42 --split val
+
+Uses the config saved inside the run folder, so the model and the fold match
+the training run exactly. Writes metrics_<split>.json, predictions_<split>.csv,
+confusion_<split>.png and anticipation_<split>.json into the run folder.
 """
 from __future__ import annotations
 
 import argparse
-import json
+import re
 from pathlib import Path
 
-from pipelines.training_pipeline import Trainer, make_loaders
+from pipelines.training_pipeline import Trainer, make_loaders, write_test_artifacts
 from utils.config import load_config
-from utils.logger import get_logger
-from utils.seed import set_seed
-from utils.visualization import plot_confusion_matrix
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate accident risk model")
-    parser.add_argument("--config", type=str, required=True)
-    parser.add_argument("--checkpoint", type=str, required=True)
-    parser.add_argument(
-        "--split", choices=["val", "test"], default="test",
-        help="Which split to evaluate on",
-    )
-    return parser.parse_args()
+from utils.manifest_dataset import VideoStore, read_manifest, split_rows
 
 
 def main() -> None:
-    args = parse_args()
-    cfg = load_config(args.config)
-    set_seed(int(cfg.seed))
+    p = argparse.ArgumentParser(description="Evaluate a trained run")
+    p.add_argument("--run", required=True, help="Run folder containing best.pt and config_used.yaml")
+    p.add_argument("--split", choices=["val", "test"], default="test")
+    args = p.parse_args()
 
-    logger = get_logger("evaluate", log_dir=cfg.paths.logs)
+    run_dir = Path(args.run)
+    cfg = load_config(run_dir / "config_used.yaml")
+    m = re.search(r"fold(\d+|X)_seed", run_dir.name)
+    fold = int(m.group(1)) if m and m.group(1) != "X" else None
 
+    parts = split_rows(read_manifest(cfg.paths.manifest), cfg, fold)
+    store = VideoStore(cfg)
+    loaders = make_loaders(cfg, {args.split: parts[args.split]}, store)
     trainer = Trainer(cfg)
-    trainer.load_checkpoint(args.checkpoint)
-
-    loaders = make_loaders(cfg)
-    if args.split not in loaders:
-        raise RuntimeError(f"Split '{args.split}' not available.")
-
-    metrics = trainer.evaluate(loaders[args.split])
-
-    out_dir = Path(cfg.paths.logs)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    metrics_path = out_dir / f"metrics_{args.split}.json"
-    with metrics_path.open("w", encoding="utf-8") as fp:
-        json.dump(metrics, fp, indent=2, default=str)
-
-    cm = metrics.get("confusion_matrix")
-    if cm:
-        plot_confusion_matrix(cm, out_dir / f"confusion_{args.split}.png")
-
-    logger.info(
-        "[%s] accuracy=%.4f f1=%.4f auc=%s tta=%s early=%s",
-        args.split,
-        metrics["accuracy"], metrics["f1"],
-        metrics["roc_auc"], metrics["time_to_accident"],
-        metrics["early_risk_detection"],
-    )
-    logger.info("Wrote %s", metrics_path)
+    trainer.load(run_dir / "best.pt")
+    result = write_test_artifacts(trainer, cfg, loaders, parts, store, run_dir, tag=args.split)
+    if not result:
+        raise SystemExit(f"Split '{args.split}' has no sequences.")
+    print(f"[{args.split}] n={result['n']} accuracy={result['accuracy']:.3f} macro-F1={result['f1']:.3f} "
+          f"AUC={result['roc_auc']:.3f} TTC-MAE={result['ttc_mae_s']:.2f}s")
+    ant = result.get("anticipation")
+    if ant:
+        a = ant["at_threshold"]
+        print(f"anticipation: AP={ant['average_precision']:.3f} event-recall={a['event_recall']:.2f} "
+              f"mean-TTA={a['mean_tta_s']:.2f}s false-alarms/min={a['false_alarms_per_min']:.2f}")
 
 
 if __name__ == "__main__":

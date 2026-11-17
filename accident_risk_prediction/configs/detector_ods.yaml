@@ -1,0 +1,74 @@
+# =============================================================================
+# YOLO26m trained on the ODS_New Bangladeshi road-object dataset.
+# Used by tools/detector/prepare_ods.py, train_ods.py and evaluate_detector.py
+# Run all commands from the accident_risk_prediction folder.
+# =============================================================================
+
+dataset:
+  root: ../ODS_New          # contains images/, labels/ and data.yaml (17 classes)
+  # Image names tell where a frame comes from: "123.jpg" = the main set,
+  # "rainy (12).jpg", "Foggy_Image (3).jpg" ... = weather subsets. A subset whose
+  # name contains one of these words gets that condition; everything else = "normal".
+  conditions: {rain: rainy, fog: foggy}
+
+# --- 1. Train / val / test split ---------------------------------------------
+split:
+  out: data/detector/ods    # hard links to the original files, no extra disk space
+  fractions: {train: 0.8, val: 0.1, test: 0.1}
+  # Neighbouring images come from the same video clip and look alike. Splitting
+  # them randomly would put near-copies of test images in training and inflate
+  # the scores, so runs of `block_size` consecutive images stay in one split.
+  block_size: 50            # images more than ~20 apart already look unrelated
+  seed_search: 300         # random block shuffles tried; the best is then refined by swapping blocks
+
+# --- 2. Training ---------------------------------------------------------------
+train:
+  base_weights: yolo26m.pt  # COCO-pretrained, downloaded by Ultralytics on first use
+  project: runs/detector
+  name: ods_yolo26m
+  # Passed straight to Ultralytics model.train(); any Ultralytics argument works here.
+  args:
+    imgsz: 640              # 960 finds more small / distant objects but trains ~2.3x slower and needs batch 8
+    epochs: 150
+    patience: 30            # stop when val mAP has not improved for this many epochs
+    batch: 16               # lower to 8 if the GPU runs out of memory
+    workers: 4              # data-loading processes (~0.7 GB RAM each); 2 if Windows reports "paging file too small"
+    cos_lr: true
+    close_mosaic: 15        # last epochs without mosaic, so the model ends on realistic full frames
+    degrees: 5              # small rotations: head / bike lean on helmet footage
+    scale: 0.7              # strong zoom augmentation: objects appear at very different distances
+    mixup: 0.1
+    fliplr: 0.5             # Bangladesh drives on the left, but no class is direction-specific
+    seed: 0
+    plots: true
+
+# --- 3. Evaluation -----------------------------------------------------------
+eval:
+  split: test
+  conf: 0.25                # operating threshold used in the risk pipeline (recall / precision tables)
+  coco_baseline: weights/yolo26x.pt   # compare against the COCO model the pipeline uses now; empty = skip
+  coco_to_ods: {0: Pedestrian, 1: Bicycle, 2: Car, 3: Motorbike, 5: Bus, 7: Truck}
+
+# --- 4. How the 17 detector classes feed the risk pipeline ------------------
+# The detector keeps all 17 fine-grained classes; the risk model gets these
+# groups (similar size and behaviour). Classes not listed are ignored.
+pipeline:
+  classes: [car, motorcycle, bicycle, pedestrian, bus, truck, rickshaw, cng, easy_bike, slow_vehicle]
+  map:
+    Car: car
+    MPV: car
+    Motorbike: motorcycle
+    Bicycle: bicycle
+    Pedestrian: pedestrian
+    Bus: bus
+    Leguna: bus             # human hauler: carries passengers, stops anywhere
+    Truck: truck
+    Pickup: truck
+    Van: truck              # covered van / microbus-sized goods vehicle
+    Rickshaw: rickshaw
+    ShoppingVan: rickshaw   # van-rickshaw
+    CNG: cng
+    Easybike: easy_bike
+    Bhotbhoti: slow_vehicle
+    PowerTiller: slow_vehicle
+    Wheelbarrow: slow_vehicle

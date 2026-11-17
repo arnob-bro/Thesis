@@ -1,130 +1,155 @@
-# Multimodal Spatiotemporal Accident Risk Prediction
+# Rider-Centric Accident Risk Prediction from Helmet-POV Video
 
-Research-grade implementation of a multimodal spatiotemporal accident risk
-prediction system, following the design specification in `arnob/*.md`.
+Predicts how close a motorcyclist is to a collision, from helmet-camera video.
+For every moment of a ride the model outputs a risk level
+(0 safe, 1 slight, 2 moderate, 3 high) and an estimated time-to-collision.
 
-The system fuses four semantic modalities:
+Labels come from **collision times marked in the videos**: each 2.4 s sequence
+is labelled by how long after its last frame the collision happens, so the
+model is trained to *predict*, not to recognise a crash in progress.
 
-| Modality            | Source                  | Output shape |
-| ------------------- | ----------------------- | ------------ |
-| Scene               | ViT (frozen)            | `[B, 768]`   |
-| Interaction         | GAT over per-frame KNN graphs (ego-excluded) | `[B, N, 256]` |
-| Temporal evolution  | Transformer encoder     | `[B, 512]`   |
-| Ego vehicle state   | MLP encoder over dashboard telemetry | `[B, 64]`   |
+## How it works
 
-A cross-attention fusion module produces a `[B, 512]` representation that feeds
-two heads:
+```
+video ──► frames (5 fps)
+      ──► YOLO detections (15 fps) ──► remove rider's own bike ──► ByteTrack
+      ──► camera-motion estimate (optical flow)        = ego-motion modality
+      ──► rider-centric graph per frame (looming, distance, bearing, rider node)
+      ──► frozen ViT embedding per frame               = scene modality
+                         │  (all cached once per video)
+                         ▼
+   scene tokens ─┐
+   graph tokens ─┼─► Temporal Transformer ─► cross-attention fusion ─► risk (ordinal) + TTC
+   ego tokens   ─┘
+```
 
-- Classification: risk level `0..3` (safe / slight / moderate / high)
-- Regression: approximate time-to-collision (TTC)
+## Setup
 
-YOLOv8 and ViT are **frozen feature extractors**. The trainable parameters are
-in: GAT, Temporal Transformer, Ego Encoder, Fusion, and Heads.
-
-## 1. Setup
-
-```bash
+```powershell
 python -m venv .venv
-source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-
-# Install torch-geometric extension wheels matching your torch/CUDA build
-# (see https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html)
+.venv\Scripts\activate
+pip install -r requirements-lock.txt
 ```
 
-## 2. Dataset Preparation
+`requirements-lock.txt` holds the exact versions used; `requirements.txt` the minimum versions.
 
-Place raw videos using the naming convention `video_<location>_<weather>_<id>.mp4`:
+## Workflow
 
-```
-data/raw_videos/{train,val,test}/video_dhaka_sunny_001.mp4
-```
+All commands run from this folder. Everything is controlled by `configs/config.yaml`.
 
-Per-sequence ego-state telemetry is required (synchronised to the extracted
-frames) and stored as CSV/JSON in `data/features/ego_state/{train,val,test}/`.
+### 1. Mark collision times
 
-Risk labels are **sequence-level** JSON files in
-`data/annotations/risk_labels/`:
-
-```json
-{ "sequence_id": "0001", "risk_level": 2, "ttc_estimate": 1.8 }
+```powershell
+python -m tools.mark_collisions --config configs/config.yaml --videos data/raw_videos
 ```
 
-Run the offline preprocessing pipeline (stages match the MD training strategy):
+Keys: `space` play/pause, `a`/`d` one frame, `j`/`l` one second, `c` collision,
+`n` near-miss, `x` loss of control, `[` `]` ignore range, `u` undo, `s` done + next.
 
-```bash
-# Stage 1: extract frames at 5 FPS
-python -m pipelines.frame_extractor --config configs/config.yaml --split train
-python -m pipelines.frame_extractor --config configs/config.yaml --split val
-python -m pipelines.frame_extractor --config configs/config.yaml --split test
+- **Collision**: first frame of contact. **Near-miss**: moment of closest approach.
+  **Loss of control**: first frame of the skid / fall.
+- Mark intros, slow-motion replays and cuts as **ignore ranges**.
+- A video saved with no events is valid: all of it is "safe" riding. Include some.
+- Prefer typing times? Use `--import-csv times.csv` (`video,time,type`).
+- `--list` prints all marked times; `--export-csv` saves them.
 
-# Stage 2: YOLOv8 detection (cached)
-python -m pipelines.detection_pipeline --config configs/config.yaml --split train
-python -m pipelines.detection_pipeline --config configs/config.yaml --split val
-python -m pipelines.detection_pipeline --config configs/config.yaml --split test
+### 2. Process the videos (once)
 
-# Stage 3: ByteTrack tracking (cached)
-python -m pipelines.tracking_pipeline --config configs/config.yaml --split train
-python -m pipelines.tracking_pipeline --config configs/config.yaml --split val
-python -m pipelines.tracking_pipeline --config configs/config.yaml --split test
-
-# Stage 4: per-frame node/edge features + KNN graphs (ego-excluded)
-python -m pipelines.graph_pipeline --config configs/config.yaml --split train
-python -m pipelines.graph_pipeline --config configs/config.yaml --split val
-python -m pipelines.graph_pipeline --config configs/config.yaml --split test
-
-# Stage 4b: ego-state alignment to sequences
-python -m pipelines.ego_state_pipeline --config configs/config.yaml --split train
-python -m pipelines.ego_state_pipeline --config configs/config.yaml --split val
-python -m pipelines.ego_state_pipeline --config configs/config.yaml --split test
+```powershell
+python -m pipelines.build_video_cache --config configs/config.yaml --videos data/raw_videos
 ```
 
-ViT scene embeddings are computed on the fly during training but cached to
-`data/cache/embeddings/` after the first epoch.
+Writes `data/video_cache/<video>/` (frames, detections, tracks, graphs, ViT
+embeddings, camera motion). Finished steps are skipped on re-runs. After
+changing feature settings: `--steps graphs --force`.
 
-## 3. Training
+Check what the detector keeps and removes (green = tracked, red = removed as
+your own bike, yellow = rider region) and tune `ego_filter` / `ego_box` if needed:
 
-```bash
-python train.py --config configs/config.yaml
+```powershell
+python -m tools.visualize_cache --config configs/config.yaml --video-id 12
 ```
 
-Checkpoints land in `checkpoints/`, structured logs in `logs/`.
+### 3. Build the sequence list
 
-Ablations are toggled in `configs/config.yaml` under the `ablation:` section
-(`use_vit`, `use_gnn`, `use_temporal`, `use_ego`).
-
-## 4. Evaluation
-
-```bash
-python evaluate.py --config configs/config.yaml --checkpoint checkpoints/best.pt
+```powershell
+python -m tools.make_event_sequences --config configs/config.yaml
 ```
 
-Reports Accuracy, Precision, Recall, F1, ROC-AUC, Time-to-Accident (TTA), and
-Early Risk Detection Score, plus a confusion matrix.
+Writes `data/manifests/sequences.csv`. Re-run it any time you change the
+time-to-event bins or mark more videos; it takes seconds. `--dry-run` only
+prints the class counts.
 
-## 5. Inference (single video)
+| Label | Time before collision |
+|---|---|
+| 3 high | 0 – 1.5 s |
+| 2 moderate | 1.5 – 3 s |
+| 1 slight | 3 – 4.5 s |
+| skipped | 4.5 – 6 s |
+| 0 safe | 6 s or more, or no collision ahead |
 
-```bash
-python inference.py \
-    --config configs/config.yaml \
-    --checkpoint checkpoints/best.pt \
-    --video path/to/clip.mp4 \
-    --ego_state path/to/ego.csv \
-    --output prediction.json
+### 4. Train and evaluate
+
+```powershell
+python train.py --config configs/config.yaml --fold 0          # one run
+python -m tools.run_baselines --config configs/config.yaml     # simple baselines, all folds
+python -m tools.run_experiments --config configs/config.yaml   # model + ablations, all folds x 3 seeds
 ```
 
-The script runs the full pipeline (frame extraction → detection → tracking →
-graphs → ViT → ego encoding → fusion → heads) and writes per-sequence risk
-class + TTC estimate.
+Folds are assigned **per video**: test = fold k, validation = fold k+1,
+train = the rest. Each run writes `runs/<name>/fold<k>_seed<s>/` with the
+config used, per-epoch `history.csv`, `best.pt`, test metrics, per-sequence
+predictions, a confusion matrix and anticipation metrics.
+`run_experiments` produces `runs/summary.md`: mean ± std for every experiment.
 
-## 6. Project Layout
+### 5. Use a trained model on a new video
 
-See top-level directory tree. Each module is independent and configurable.
+```powershell
+python inference.py --run runs/full/fold0_seed0 --video path\to\ride.mp4
+```
 
-## 7. Reproducibility
+## Metrics
 
-- Global seed in `configs/config.yaml` (`seed: 42`)
-- Configs persisted alongside checkpoints
-- Frame order strictly chronological
-- Train/val/test split by **video** (never by frame)
-- Caching layer prevents recomputation of expensive YOLO / ViT outputs
+- **Sequence level**: accuracy, macro-F1, recall of risky classes, ordinal
+  error (how many classes off), ROC-AUC, TTC error in seconds.
+- **Anticipation** (model slid over whole test videos): share of collisions
+  warned about in advance, mean time-to-accident (how early), false alarms
+  per minute of safe riding, average precision.
+
+## Detector
+
+The pipeline uses **YOLO26x** (`weights/yolo26x.pt`), the most accurate COCO
+detector Ultralytics provides. COCO has no rickshaw, CNG or easy-bike class.
+A Bangladesh detector trained on the ODS_New dataset (17 classes) replaces it:
+
+```powershell
+python -m tools.detector.prepare_ods        # split ../ODS_New by video clip
+python -m tools.detector.train_ods          # YOLO26m, then evaluation report
+```
+
+Settings are in `configs/detector_ods.yaml`. The report
+(`runs/detector/ods_yolo26m/eval_test/report.md`) ends with the lines to paste
+into `configs/config.yaml`. The full guide, including labelling your own
+helmet frames, is in [docs/detector_guide.md](docs/detector_guide.md).
+
+## Folder map
+
+| Path | Purpose |
+|---|---|
+| `configs/config.yaml` | all settings |
+| `tools/mark_collisions.py` | mark / list collision times |
+| `pipelines/build_video_cache.py` | per-video processing |
+| `tools/make_event_sequences.py` | collision times → sequence manifest |
+| `features/graph_builder.py` | rider-centric graph features, ego-bike filter |
+| `features/ego_motion.py` | camera-motion estimation |
+| `models/full_model.py` | the model |
+| `pipelines/training_pipeline.py` | training, evaluation, anticipation scoring |
+| `tools/run_baselines.py`, `tools/run_experiments.py` | baselines, ablations, results table |
+| `tools/detector/prepare_ods.py`, `train_ods.py`, `evaluate_detector.py`, `configs/detector_ods.yaml` | Bangladesh detector trained on ODS_New |
+| `tools/detector/` (other scripts), `configs/detector.yaml` | labelling your own helmet frames: sample, pre-label, merge, train |
+| `tests/test_smoke.py` | quick checks: `python -m tests.test_smoke` |
+| `legacy/` | the previous per-sequence pipeline and docs, for reference only |
+
+`legacy/pre_upgrade_snapshot.zip` is a complete copy of the code before the
+upgrade. The old hand-labelled sequences in `data/sequences/` and the old
+checkpoints in `checkpoints/` only work with that code.

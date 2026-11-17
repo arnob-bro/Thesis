@@ -34,6 +34,17 @@ class Config(dict):
         self[key] = self._wrap(value)
 
 
+def to_plain_dict(value: Any) -> Any:
+    """Recursively convert Config objects into YAML-serializable containers."""
+    if isinstance(value, Config):
+        return {k: to_plain_dict(v) for k, v in value.items()}
+    if isinstance(value, dict):
+        return {k: to_plain_dict(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [to_plain_dict(v) for v in value]
+    return value
+
+
 def load_config(path: str | Path) -> Config:
     path = Path(path)
     if not path.exists():
@@ -43,8 +54,22 @@ def load_config(path: str | Path) -> Config:
     return Config(raw)
 
 
+def apply_overrides(cfg: Config, overrides: list[str] | None) -> Config:
+    """Apply ``section.key=value`` overrides (values parsed as YAML)."""
+    for item in overrides or []:
+        key, _, value = item.partition("=")
+        node = cfg
+        parts = key.strip().split(".")
+        for p in parts[:-1]:
+            node = node[p]
+        if parts[-1] not in node:
+            raise KeyError(f"Unknown config key: {key}")
+        node[parts[-1]] = Config._wrap(yaml.safe_load(value))
+    return cfg
+
+
 def save_config(cfg: Config, path: str | Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fp:
-        yaml.safe_dump(dict(cfg), fp, sort_keys=False)
+        yaml.safe_dump(to_plain_dict(cfg), fp, sort_keys=False)

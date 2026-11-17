@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+.venv/
+*.pt
+*.zip
+
+# data and results (kept out of git; back these up separately)
+accident_risk_prediction/data/
+accident_risk_prediction/runs/
+accident_risk_prediction/checkpoints/
+accident_risk_prediction/logs/
+accident_risk_prediction/outputs/
+data dump/
+motovlog videos/
+converted motovlog cids/
+new/
+ODS_New/
+
+# but do keep the collision-time annotations and the manifest
+!accident_risk_prediction/data/
+accident_risk_prediction/data/*
+!accident_risk_prediction/data/annotations/
+accident_risk_prediction/data/annotations/*
+!accident_risk_prediction/data/annotations/collision_events.json
+!accident_risk_prediction/data/manifests/
+!accident_risk_prediction/legacy/pre_upgrade_snapshot.zip

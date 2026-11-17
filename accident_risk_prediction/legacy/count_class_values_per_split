@@ -1,0 +1,83 @@
+import json
+from pathlib import Path
+from collections import Counter
+
+# -----------------------------
+# CONFIG
+# -----------------------------
+DATA_ROOT = Path("data/sequences")
+SPLITS = ["train", "val", "test"]
+
+CLASS_MAP = {
+    0: "safe",
+    1: "slight",
+    2: "moderate",
+    3: "high"
+}
+
+# -----------------------------
+# READ LABEL
+# -----------------------------
+def read_label(label_path: Path):
+    with open(label_path, "r") as f:
+        data = json.load(f)
+
+    return data["risk_level"]
+
+
+# -----------------------------
+# SPLIT COUNTS
+# -----------------------------
+def get_split_distribution(split_path: Path):
+    counter = Counter()
+
+    for seq_dir in split_path.iterdir():
+        if not seq_dir.is_dir():
+            continue
+
+        label_file = seq_dir / "label.json"
+        if not label_file.exists():
+            continue
+
+        label = read_label(label_file)
+        counter[label] += 1
+
+    return counter
+
+
+# -----------------------------
+# MAIN
+# -----------------------------
+def main():
+    print("\n📊 RISK CLASS DISTRIBUTION\n")
+
+    global_counter = Counter()
+
+    for split in SPLITS:
+        split_path = DATA_ROOT / split
+
+        if not split_path.exists():
+            print(f"❌ Missing: {split}")
+            continue
+
+        dist = get_split_distribution(split_path)
+        total = sum(dist.values())
+        global_counter.update(dist)
+
+        print(f"\n🔹 {split.upper()} (total = {total})")
+
+        for k in sorted(dist.keys()):
+            label_name = CLASS_MAP.get(k, str(k))
+            print(f"   {label_name:<10} ({k}) : {dist[k]}")
+
+    print("\n📦 OVERALL")
+
+    for k in sorted(global_counter.keys()):
+        label_name = CLASS_MAP.get(k, str(k))
+        print(f"   {label_name:<10} ({k}) : {global_counter[k]}")
+
+    print("\n✅ Done")
+
+
+if __name__ == "__main__":
+    main()
