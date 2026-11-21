@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "videos": {
+    "1.mp4": {
+      "path": "data/raw_videos/train/1.mp4",
+      "video_id": "1",
+      "split": null,
+      "fps": 30.0,
+      "duration_s": 67.733,
+      "status": "done",
+      "events": [
+        {
+          "time_s": 10.167,
+          "type": "near_miss",
+          "note": ""
+        },
+        {
+          "time_s": 55.1,
+          "type": "near_miss",
+          "note": ""
+        }
+      ],
+      "ignore": [
+        [
+          35.033,
+          35.767
+        ],
+        [
+          48.667,
+          48.7
+        ]
+      ]
+    }
+  }
+}
