@@ -39,16 +39,31 @@ def label_from_tte(tte: Optional[float], lab: Config) -> Optional[int]:
     return None
 
 
+def post_event_skip(event_type: Optional[str], lab: Config) -> float:
+    """Seconds of aftermath to drop after an event of this type.
+
+    ``post_event_skip`` is either one number for every type, or a mapping
+    ``{type: seconds, default: seconds}``. A near miss needs a much shorter
+    skip than a crash: the rider keeps riding, so the seconds after it can be
+    the real lead-up to a second, separate event.
+    """
+    skip = lab.post_event_skip
+    if isinstance(skip, (int, float)):
+        return float(skip)
+    return float(skip.get(event_type, skip.get("default", 5.0)))
+
+
 def classify(end: int, fps: float, seq_len: int, events: List[Dict],
              ignore: List[List[float]], lab: Config) -> Optional[Window]:
     """Label one window, or return None if it must not be used at all."""
     start = end - seq_len + 1
     t_s, t_e = start / fps, end / fps
-    post, safe_min = float(lab.post_event_skip), float(lab.safe_min_tte)
+    safe_min = float(lab.safe_min_tte)
 
     if any(t_s <= b and t_e >= a for a, b in ignore):
         return None
-    if any(t_e >= ev["time_s"] and t_s <= ev["time_s"] + post for ev in events):
+    if any(t_e >= ev["time_s"] and t_s <= ev["time_s"] + post_event_skip(ev.get("type"), lab)
+           for ev in events):
         return None   # touches an event or its aftermath
     nxt = next((ev for ev in events if ev["time_s"] >= t_e), None)
     tte = None if nxt is None else nxt["time_s"] - t_e

@@ -13,7 +13,7 @@ from pipelines.training_pipeline import RiskLoss
 from utils.config import apply_overrides, load_config
 from utils.manifest_dataset import collate
 from utils.metrics import compute_metrics
-from utils.windows import assign_folds, dense_windows, plan_windows
+from utils.windows import assign_folds, dense_windows, plan_windows, post_event_skip
 
 CFG = "configs/config.yaml"
 
@@ -24,7 +24,7 @@ def test_window_labels():
     events = [{"time_s": 40.0, "type": "collision"}]
     wins = plan_windows(300, 5.0, 12, events, [[0.0, 3.0]], lab)
     for w in wins:
-        assert w.t_end < 40.0 or w.start / 5.0 > 40.0 + lab.post_event_skip   # never touches the crash
+        assert w.t_end < 40.0 or w.start / 5.0 > 40.0 + post_event_skip("collision", lab)   # never touches the crash
         assert w.start / 5.0 > 3.0                                            # ignore range respected
         if w.tte is not None and w.tte < 1.5:
             assert w.risk == 3
@@ -35,6 +35,24 @@ def test_window_labels():
     cut = plan_windows(300, 5.0, 12, events, [[38.0, 39.0]], lab)
     assert all(w.risk == 0 for w in cut if w.t_end < 38.0)
     assert len(dense_windows(300, 5.0, 12, events, [], lab)) > len(wins)
+
+
+def test_close_events():
+    """Two events < 5 s apart: a near miss must not hide the lead-up to the
+    collision that follows it, but a crash's aftermath must still be dropped."""
+    cfg = load_config(CFG)
+    lab = cfg.event_labeling
+    fps, seq_len = 5.0, 12                      # 2.4 s windows
+    near_then_crash = [{"time_s": 40.0, "type": "near_miss"}, {"time_s": 44.5, "type": "collision"}]
+    wins = dense_windows(300, fps, seq_len, near_then_crash, [], lab)
+    between = [w for w in wins if 40.0 < w.t_end < 44.5]
+    assert between, "windows between a near miss and a later collision must survive"
+    assert all(w.event_type == "collision" and w.start / fps > 41.0 for w in between)
+    assert any(w.risk == 3 for w in between)    # the collision keeps its high-risk windows
+
+    crash_then_crash = [{"time_s": 40.0, "type": "collision"}, {"time_s": 44.5, "type": "collision"}]
+    wins = dense_windows(300, fps, seq_len, crash_then_crash, [], lab)
+    assert not [w for w in wins if 40.0 <= w.t_end <= 49.5]   # all aftermath, nothing kept
 
 
 def test_folds_are_per_video():

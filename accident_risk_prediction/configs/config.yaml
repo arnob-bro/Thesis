@@ -38,7 +38,11 @@ event_labeling:
     slight:   [3.0, 4.5]   # 1: conflict developing, normal correction still possible
   safe_min_tte: 6.0        # 0: windows >= 6 s before an event (or with no upcoming event)
                            #    TTE in [4.5, 6) is an ambiguous buffer and is skipped
-  post_event_skip: 5.0     # skip this many seconds after each event (crash aftermath)
+  post_event_skip:         # seconds skipped after each event, per type (aftermath)
+    collision: 5.0         #   crash: fall, tumbling camera, stopped bike
+    loss_of_control: 5.0   #   skid / solo fall: same as a crash
+    near_miss: 1.0         #   rider keeps riding: what follows can lead up to a NEW event
+    default: 5.0           #   any other type
   risk_stride: 2           # stride (sampled frames) inside the pre-event zone (more samples)
   safe_stride: 12          # stride elsewhere (non-overlapping)
   max_safe_per_video: 40   # cap safe windows per video to limit imbalance (null = no cap)
@@ -60,19 +64,43 @@ split:                     # used only when training without --fold
 # {detector_class_id: index_in_classes}. Leave a class out of `class_map` to
 # drop it (e.g. an `ego_vehicle` class).
 # ---------------------------------------------------------------------------
+# Bangladesh detector: YOLO26m trained on ODS_New (17 classes, test mAP50 0.83).
+# Report: runs/detector/ods_yolo26m/eval_test/report.md
 yolo:
-  weights: weights/yolo26x.pt
+  weights: runs/detector/ods_yolo26m/weights/best.pt
+  imgsz: 640
+  agnostic_nms: true       # one box per object even if two fine classes compete
   conf_threshold: 0.25
   iou_threshold: 0.45
   device: cuda
-  classes: [car, motorcycle, bicycle, pedestrian, bus, truck]
-  class_map:               # COCO id -> index in `classes`
-    2: 0
-    3: 1
-    1: 2
-    0: 3
-    5: 4
-    7: 5
+  classes: [car, motorcycle, bicycle, pedestrian, bus, truck, rickshaw, cng, easy_bike, slow_vehicle]
+  class_map:               # detector class id -> index in `classes`
+    0: 2    # Bicycle -> bicycle
+    1: 4    # Bus -> bus
+    2: 9    # Bhotbhoti -> slow_vehicle
+    3: 0    # Car -> car
+    4: 7    # CNG -> cng
+    5: 8    # Easybike -> easy_bike
+    6: 4    # Leguna -> bus
+    7: 1    # Motorbike -> motorcycle
+    8: 0    # MPV -> car
+    9: 3    # Pedestrian -> pedestrian
+    10: 5   # Pickup -> truck
+    11: 9   # PowerTiller -> slow_vehicle
+    12: 6   # Rickshaw -> rickshaw
+    13: 6   # ShoppingVan -> rickshaw
+    14: 5   # Truck -> truck
+    15: 5   # Van -> truck
+    16: 9   # Wheelbarrow -> slow_vehicle
+
+# Previous COCO detector (to switch back, replace the yolo block above with this):
+# yolo:
+#   weights: weights/yolo26x.pt
+#   conf_threshold: 0.25
+#   iou_threshold: 0.45
+#   device: cuda
+#   classes: [car, motorcycle, bicycle, pedestrian, bus, truck]
+#   class_map: {2: 0, 3: 1, 1: 2, 0: 3, 5: 4, 7: 5}   # COCO id -> index
 
 # The rider's own handlebars / tank / arms get detected as "motorcycle" or
 # "person". Drop boxes of these classes that touch the bottom edge and are wide.

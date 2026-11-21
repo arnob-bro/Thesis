@@ -37,3 +37,7 @@ scikit-learn>=1.3.0
 
 # Visualization
 matplotlib>=3.7.0
+
+# Detector demo app (tools/detector/detect_app.py)
+streamlit>=1.30.0
+imageio-ffmpeg>=0.4.9     # bundled ffmpeg: H.264 output that plays in the browser

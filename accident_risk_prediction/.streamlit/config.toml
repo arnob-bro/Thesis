@@ -1,0 +1,4 @@
+# Used when running `streamlit run tools/detector/detect_app.py` from this folder.
+[server]
+maxUploadSize = 4096        # MB, so long helmet videos can be uploaded
+fileWatcherType = "none"    # avoids a harmless but noisy torch.classes traceback in the console
